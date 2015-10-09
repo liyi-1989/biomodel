@@ -1,0 +1,122 @@
+---
+title: "Estimating dispersal from adult abundance and recruitment"
+author: "Tarik C. Gouhier"
+date: "July 29, 2015"
+output: pdf_document
+---
+
+# Model overview
+
+The goal is to determine how to estimate the parameters (mean, variance) of a normal dispersal kernel $D$
+from spatial patterns of recruitment and abundance across years. The model should consist
+of three successive stages: Larval production ($L_{x, t}$), recruitment ($R_{x, t}$) 
+and adult abundance ($A_{x, t+1}$) at location $x$. Below I describe each stage of 
+the model along with the data available.
+
+## Larval production
+
+Larval production $L_{x, t}$ at each site $x$ depends on adult abundance $A_{x, t}$ and environmental
+conditions $E_{x, t}$ such that:
+
+\[
+L_{x, t} = f \left( A_{t, x}, E_{t, x} \right) = p_{t, x} \cdot A_{t, x} \cdot E_{t, x}
+\]
+
+Where $p_{t, x}$ represents the average larval production per unit of adult abundance.
+It's fine for $f$ to be linear initially. In reality, this function is probably unimodal with
+respect to environmental conditions $E$. Larvae $L_{x, t}$ then disperse according to a kernel
+that can be approximated by a normal distribution. Although we cannot track how larvae 
+travel up and down the coast, we do have access to the larvae that end up arriving at each site.
+
+## Recruitment
+
+Recruitment $R_{x, t}$ represents all the larvae that arrive at a given site $x$
+at time $t$. This quantity depends on the number of larvae that are produced across
+the coastline $L{x, t}$ at time $t$ and then get dispersed according to our normal 
+dispersal kernel $D$ whose parameters we seek to estimate. Using Yi's original model,
+this kernel could be expressed as:
+
+\[
+D = L_{x, t} \cdot e^{e^{-\frac{\left(d_{x,i} - \mu_d\right)^2}{\sigma^2_d}}} 
+\]
+
+Summing the larvae produced across all sites $i$ and recruiting to site $x$ based 
+on environmental conditions $E_{x, t}$ yields recruitment $R_{x, t} = g \left(L_{\cdot, t}, E_{x,t} \right)$
+such that:
+
+\[
+R_{x, t} = k + \log\left(\sum_{i=1}^N L_{i, t} \cdot e^{-\frac{\left(d_{x,i} - \mu_d\right)^2}{\sigma^2_d}} \right) + \beta \cdot E_{x, t} + \epsilon
+\]
+
+Where $\beta$ is a vector of parameters and $E_{x,t}$ is a $N$-site by 3 matrix containing
+measurements of sea surface temperature, upwelling and chl-a.
+
+## Adult abundance
+
+The final step is to model adult abundance $A_{x, t+1}$ as a function of recruitment
+$R_{x, t}$. The temporal lag is due to the fact that larvae
+take at least one year to contribute to "adult abundance" (they're technically still juveniles).
+Larval survival into adulthood depends on a host of factors including species interactions and 
+environmental conditions. If we focus exclusively on environmental conditions and ignore species
+interactions for now, we can model adult abundance $A_{x, t+1} = h \left(R_{x, t}, E_{x, t+1}\right)$
+such that:
+
+\[
+A_{x, t+1} = b \cdot R_{x, t} \cdot E_{x, t+1}
+\]
+
+I'm really unsure about the form of function $h$ here. We should use model selection
+to compare linear and more complex relationships (e.g., quadratic).
+
+# Getting the recruitment data
+
+Unfortunately, the recruitment data was not collected at the same locations as the
+adult abundance data. Hence, we need to interpolate the recruitment data using cubic splines
+prior to merging it with the adult abundance data. The clunky code below does just that.
+
+```{r}
+# 2-D interpolation
+library(akima)
+# Load adult data
+load('pisco.RData')
+# Load recruitment data
+recruits <- read.csv("intertidal_recruitment.csv")
+# Extract adult abundance of mussels (species M. californianus) in the mid zone 
+adults <- subset(data.mid.zone, speciesnum == 75)
+# Get unique sites for surveys of adult mussels
+sites.adults <- unique(subset(adults, select = c("lat", "lon")))
+# Sort by latitude and longitude
+sites.adults <- sites.adults[order(sites.adults$lat, sites.adults$lon), ]
+# Number of sites for adults
+nsites <- nrow(sites.adults)
+# Aggregate recuitment data by year for mussels only
+recruits <- aggregate(mytilus.rec ~ lat + lon + year, FUN = mean, 
+                      na.rm = TRUE, data = recruits)
+# Sort recruitment data
+recruits <- recruits[order(recruits$lat, recruits$lon), ]
+# Get unique years for recruitment
+recruits.years <- unique(recruits$year)
+recruits.interp <- matrix(nrow = nsites * length(unique(recruits$year)), 
+                          ncol = 4)
+colnames(recruits.interp) <- c("year", "lon", "lat", "mytilus.rec")
+
+# Loop performs 2D interpolation of recruitment data for each unique year
+# and then extracts only the locations where we have adult abundance
+k <- 1
+for (y in recruits.years) {
+  sub <- subset(recruits, year == y)
+  tmp <- interp(x = sub$lon, y = sub$lat, z = sub$mytilus.rec, 
+                xo = sites.adults$lon, yo = sites.adults$lat, 
+                linear = FALSE, extrap = TRUE)
+  # Get recruitment at sites where we have abundance only
+  rec <- diag(tmp$z)
+  # Get rid of nonsensical negative recruitment values
+  rec[rec < 0 ] <- 0
+  recruits.interp[k:(k + nsites - 1), ] <- cbind(y, tmp$x, tmp$y, rec)
+  k <- k + nsites
+}
+# Merge adult abundance and interpolated recruitment data
+adults.recruits.merged <- merge(adults, recruits.interp)
+write.csv(file = "adults.recruits.merged.csv", 
+          adults.recruits.merged, row.names = FALSE)
+```

@@ -1,0 +1,291 @@
+---
+title: "Basic Model"
+date: "07/12/2015"
+output: pdf_document
+---
+
+## 1. Notations
+
+- $n_s$ is the number of sites
+- $N_{ts}$ be the number of species at time $t$ and site $s$
+- $d_{si}$ be the distance between two sites $s$ and site $i$. Currently I am using the signed(North is positive) distance(unit is degree) of the latitude between each two sites.
+- The environmental variables are $e_{chi}, e_{sst}$ and $e_{upw}$
+- Let $y_{ts}=\log N_{(t+1)s}$.
+
+## 2. The model
+
+The dispersal kernel(for site $i$) is some constant($K=e^{k}$) times the following term:
+\[
+N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}},
+\]
+
+where $N_{ti}$ is the number of species at time $t$ and site $i$.
+
+So, the raw model is:
+
+\[
+y=k+\log(\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}})+\beta_1e_{chi}+\beta_2e_{sst}+
+\beta_3e_{upw}+\epsilon,
+\]
+
+
+where $\epsilon\sim N(0,\sigma^2)$ .  So we have 
+
+- three parameters related to the $\textbf{dispersal}$: $k, \mu_d, \sigma_d$.
+- three parameters for the $\textbf{environmental}$ variables $\beta_1, \beta_2, \beta_3$.
+
+## 3. Estimation
+
+Let $\theta=(k, \mu_d, \sigma_d, \beta_1, \beta_2, \beta_3)$, $x$ be our data ($N$:number of species, $d$:distance between the sites, $e$: the environmental variables), $y=f(x,\theta)$ is our model. Then $y\sim N(f(x,\theta),\sigma^2)$
+
+
+\[
+L(\theta;y,x)=\prod_{j=1}^m \phi(\frac{y_j-f(x_j,\theta)}{\sigma})
+\]
+
+
+and
+
+
+\[
+l(\theta;y,x)=\log L(\theta;y,x)=\sum_{j=1}^m \log \phi(\frac{y_j-f(x_j,\theta)}{\sigma})
+\]
+
+
+**Note**: The model is a nonlinear regression problem. After some calculation about the above log-likelihood function, we can show that: maximum likelihood estimation is equivalent to the nonlinear least square estimation. So we need to minimize the objective function:
+
+
+\[
+\sum_{j=1}^n (y_j-f(x_j,\theta))^2
+\]
+
+
+## 4. About the Data
+
+As for our data, we have 4 years(year0, year1, year2, year3) data. So $y$ should be
+
+
+\[
+y=N_{ts}\quad for\quad [year1(s1,...,s48),year2(s1,...,s48),year3(s1,...,s48)]
+\]
+
+
+Predictive variables $x$ contains three parts: 
+
+1. species number $N$, 
+
+\[
+N=N_{ts}\quad for\quad [year0(s1,...,s48),year1(s1,...,s48),year2(s1,...,s48)]
+\]
+
+2. the distance $d$, which should be a distance matrix between the sites (s1,...,s48)
+
+3. the environmental variables $e_i$, which is
+
+\[
+e_i=e_{i}\quad for\quad [year0(s1,...,s48),year1(s1,...,s48),year2(s1,...,s48)]
+\]
+
+## 5. Code and Results
+
+### 5.1 EDA
+
+```{r}
+library(synchrony)
+data(pisco.data)
+head(pisco.data)
+summary(pisco.data)
+```
+
+In the above data:
+
+
+- lat and lon: the location of the stations(48 different stations)
+- chl, sst, and upwelling: the environmental variables
+- mussel_abund: the variable we want to predict
+- year: 2000-2004
+
+Now we extract the target variable, and the predictive variables:
+
+```{r}
+y=subset(pisco.data,year>2000,select=c(mussel_abund)) # species number
+y[y[,1]==0,]=min(y[y[,1]!=0,])/2 # replace 0 to half of the minimum positive number
+y=log(y) # take log of the species number
+
+N=subset(pisco.data,year<2003,select=c(mussel_abund)) # (past) species number
+#D=coord2dist(pisco.data[1:48,1:2],lower.tri = F) # site distance using lat and lon
+D=dist(pisco.data[1:48,1],diag = T,upper = T) # site distance using only (signed) lat
+D=as.matrix(D)
+for(i in 1:48){
+    for(j in 1:48){
+        if(i>j){
+            D[i,j]=-D[i,j]
+        }
+    }
+}
+E=subset(pisco.data,year<2003,select=c(chl,sst,upwelling)) # Environment variable
+D=as.matrix(D)
+D[1:6,1:6]
+```
+
+Here, we define the objective function. Since we want to do minimization(not max), the objective function is the either the negative log-likelihood function, or the nonlinear least squre error(they are equivalent in our case). The input arguments are:
+
+- t: all the parameters which need to do minimization, $(k, \mu_d, \sigma_d, \beta_1, \beta_2, \beta_3)$
+- y: target variable(log of species number)
+- N: past species number
+- D: distance matrix among 48 sites
+- E: 3 environmental variables
+
+
+### 5.2 First Model
+
+\[
+y=k+\log(\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}})+\beta_1e_{chi}+\beta_2e_{sst}+
+\beta_3e_{upw}+\epsilon,
+\]
+
+
+```{r cache=TRUE}
+# log-likelihood function
+logl2=function(t,y,N,D,E){
+  n=dim(y)[1]
+  f=rep(0,n) # value of the regression function
+  yr=rep(0:2,each=48) # 3 years(0-2) used: 00-03 for X, 01-04 for y
+  for(j in 1:n){
+    # dispersal kernal (for the 48 sites)
+    Ker=exp(-(D[j%%48+((j%%48)==0)*48,]-t[2])^2/(t[3]^2)) 
+    # number of species for 48 sites
+    Nj=N[(yr[j]*48+1):((yr[j]+1)*48),] 
+    # dispersal + three environment terms
+    f[j]=t[1]+log(sum(Ker*Nj))+t[4]*E[j,1]+t[5]*E[j,2]+t[6]*E[j,3] 
+  }
+  
+  return(sum((y[,1]-f)^2)) # return the objective function
+}
+
+
+# do the optimization to find the parameters
+t0=c(1,0,1,0.1,0.1,0.1)
+res2=nlm(logl2,t0,hessian=T,print.level=1,y=y,N=N,D=D,E=E,iterlim=1e4,steptol=1e-5)
+```
+
+```{r}
+t=res2$estimate
+print("The estimated parameters are:")
+print(t)
+n=dim(y)[1]
+  f=rep(0,n) # value of the regression function
+  yr=rep(0:2,each=48) # 3 years(0-2) used: 00-03 for X, 01-04 for y
+  for(j in 1:n){
+    # dispersal kernal (for the 48 sites)
+    Ker=exp(-(D[j%%48+((j%%48)==0)*48,]-t[2])^2/(t[3]^2)) 
+    # number of species for 48 sites
+    Nj=N[(yr[j]*48+1):((yr[j]+1)*48),] 
+    # dispersal + three environment terms
+    f[j]=t[1]+log(sum(Ker*Nj))+t[4]*E[j,1]+t[5]*E[j,2]+t[6]*E[j,3] 
+  }
+MSE=mean((y[,1]-f)^2)
+print(paste("MSE in log scale is: ",MSE))
+par(mfrow=c(1,1))
+options(repr.plot.width = 10)
+options(repr.plot.height = 5)
+plot(f,y[,1],main=expression(paste("log scale, ", hat(y)," vs y")))
+abline(a=0,b=1,col=2)
+plot(f,y[,1]-f,main=expression(paste("log scale, ", hat(y)," vs e")))
+abline(a=0,b=0,col=2)
+```
+
+
+### 5.3 95\% Confidence Interval for $\mu_d$
+
+Using the fact that MLE is aymptotic normal, $$\sqrt{n}(\hat{\theta}-\theta)\to N(0,\frac{1}{I_1(\theta)}),$$
+
+i.e. $\hat{\theta}=N(\theta,\frac{1}{I_n(\theta)})$, where $I_n(\theta)=nI_1(\theta)$ is the Fisher Information for n sample points, and one sample point. So the 95\% C.I. for $\theta$ is $$\hat{\theta}\pm1.96\frac{1}{\sqrt{J_n(\hat{\theta})}},$$
+
+where $J_n(\hat{\theta})$ is the observed Fisher Information $J_n(\hat{\theta})=-l_n''(\theta)=-\sum_{i=1}^n(\log f(X_i;\theta))''$
+
+$$
+\begin{aligned}
+l(\theta;y,X)&= \sum_{j=1}^m\log \phi(\frac{y_j-f(x_j;\theta)}{\sigma})\\
+ &= \sum_{j=1}^m[\log(\frac{1}{\sqrt{2\pi}})-\frac{1}{2}[\frac{y_j-f(x_j;\theta)}{\sigma}]^2\\
+ &=m\log(\frac{1}{\sqrt{2\pi}})-\frac{1}{2\sigma^2}\sum_{j=1}^m[y_j-f(x_j;\theta)]^2
+\end{aligned}
+$$
+
+$$
+\frac{\partial l}{\partial\mu_d}=\frac{1}{\sigma^2}\sum_{j=1}^m[y_j-f(x_j;\theta)]\frac{\partial f}{\partial\mu_d}
+$$
+
+$$
+\begin{aligned}
+\frac{\partial^2 l}{\partial\mu_d^2}&=\frac{1}{\sigma^2}\sum_{j=1}^m\{[-\frac{\partial f}{\partial\mu_d}]\frac{\partial f}{\partial\mu_d}+[y-f]\frac{\partial^2 f}{\partial\mu_d^2}\}\\
+&=\frac{1}{\sigma^2}\sum_{j=1}^m[-\frac{\partial f}{\partial\mu_d}-(\frac{\partial f}{\partial\mu_d})^2+[y-f]\frac{\partial^2 f}{\partial\mu_d^2}]
+\end{aligned}
+$$
+
+where,
+
+$$
+\frac{\partial f}{\partial\mu_d}=\frac{1}{\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}}\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}\frac{2(d_{si}-\mu_d)}{\sigma_d^2}
+$$
+
+$$
+\begin{aligned}
+\frac{\partial^2 f}{\partial\mu_d^2}&=\frac{[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}\frac{2(d_{si}-\mu_d)}{\sigma_d^2}]'[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}]-[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}]'[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}\frac{2(d_{si}-\mu_d)}{\sigma_d^2}]}{[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}]^2}
+\end{aligned}
+$$
+
+Here,
+
+$$
+[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}]'=\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}\frac{2(d_{si}-\mu_d)}{\sigma_d^2}
+$$
+
+
+$$
+[\sum_{i=1}^{n_s}N_{ti}e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}\frac{2(d_{si}-\mu_d)}{\sigma_d^2}]'=
+\sum_{i=1}^{n_s}N_{ti}[e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}(\frac{2(d_{si}-\mu_d)}{\sigma_d^2})^2+e^{-\frac{(d_{si}-\mu_d)^2}{\sigma_d^2}}(-\frac{2}{\sigma_d^2})]
+$$
+
+
+
+
+```{r}
+mu_mle=t[2]
+sigma=sd(y[,1]-f)
+n=dim(y)[1]
+f=rep(0,n) # value of the regression function
+fp=rep(0,n)
+fpp=rep(0,n)
+yr=rep(0:2,each=48) # 3 years(0-2) used: 00-03 for X, 01-04 for y
+for(j in 1:n){
+    # dispersal kernal (for the 48 sites)
+    Ker=exp(-(D[j%%48+((j%%48)==0)*48,]-t[2])^2/(t[3]^2)) 
+    # number of species for 48 sites
+    Nj=N[(yr[j]*48+1):((yr[j]+1)*48),] 
+    # dispersal + three environment terms
+    f[j]=t[1]+log(sum(Ker*Nj))+t[4]*E[j,1]+t[5]*E[j,2]+t[6]*E[j,3] 
+    #-------------------------------------------------------------
+    dmm=D[j%%48+((j%%48)==0)*48,]-t[2]# d_si - mu_d   
+    fp[j]=sum(Nj*Ker*2*dmm/t[3]^2)/sum(Ker*Nj) # f'    
+    Kp=sum(Nj*(Ker*4*dmm^2-Ker*2/t[3]^2)) # derivative of top for f'    
+    kp=sum(Nj*Ker*2*dmm/t[3]^2) # derivative of bottom for f'    
+    fpp[j]=(Kp*sum(Ker*Nj)-kp*sum(Nj*Ker*2*dmm/t[3]^2))/sum(Ker*Nj)^2 # f''  
+}
+lpp=sum(-fp-fp^2+(y-f)*fp)/sigma^2 #l''(wrt mu_d)
+mu_Jn=-lpp # observed Fisher Information
+mu_l=1.96/mu_Jn # 95% CI half length
+c(t[2]-mu_l, t[2]+mu_l) # 95% CI
+```
+
+
+## 6. Comments
+
+- Using $log(N)$ to avoid negative fitting results
+- Using signed lat distance to make $\mu_d$ having the meaning that the center of the dispersal kernel(moving towards the North ot South of the site). As we can see from the fitting result(second parameter), $\mu_d$ is about 0.0035 degree to the South.
+- Zero values(in this data set, we do not have too much zeros) are replaced by half of the minimum positive value
+- Result may change if the initial value changes(of course, we want the global minimum of the optimization problem). 
+
+
+
+
